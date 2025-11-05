@@ -1,4 +1,4 @@
-# hook.py – YouTube Shorts最適化・決定版（main.py互換・視点自動推定版）
+# hook.py – YouTube Shorts最適化・決定版（main.py互換・視点自動推定版 / 構造化出力対応）
 # 目的:
 #  - 0.5〜1.2秒で「自己投影」させる強フック（Shock/Empathy/Time/Release/Status）
 #  - theme から {mini}/{scene} を抽出し、さらに「誰→誰」の視点を自動推定
@@ -6,19 +6,20 @@
 #  - 言語: en / ja / ko / pt（自然文・記号多用回避）
 #  - 長さ制御: 英/葡=85字、日本/韓国=90字（ENVで変更可）
 #
-# 使い方（既存のまま）:
-#   from hook import generate_hook
-#   text = generate_hook(theme, audio_lang, pattern_hint)
+# 互換性:
+#  - generate_hook(theme, audio_lang, pattern_hint, context) → 文字列（従来通り）
+#  - generate_hook(theme, audio_lang, pattern_hint, context, return_dict=True) → 構造化dict
+#    dictには "text", "tone", "setting", "difficulty", "speaker", "listener",
+#    "functional", "scene", "mini", "pattern", "category", "requester", "lang" 等が入る
 #
-# 追加オプション（任意）:
-#   HOOK_AB=0..n           # テンプレカテゴリ固定（未指定なら自動）
-#   HOOK_MAX_CHARS=85      # 英語系の最大文字数（ja/koは+5）
-#   HOOK_SPEAKER/HOOK_LISTENER  # 明示的に視点を上書きしたい場合
+# 推奨の今後の使い方（段階的移行）:
+#   text = generate_hook(theme, audio_lang, pattern_hint, context)                   # 既存
+#   spec = generate_hook(theme, audio_lang, pattern_hint, context, return_dict=True) # 新：統一の親
 
 import os
 import re
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from translate import translate  # ★ 各言語へ毎回きちんと翻訳
 
 # ---------------- ユーティリティ ----------------
@@ -80,7 +81,6 @@ def _mini_and_scene_label(functional: str, scene: str, lang: str) -> Tuple[str, 
       3) 仕上げの軽整形
       4) 短い方を {mini}、もう一方を {scene}
     """
-    # --- 1) 英語ゆらぎの正規化（英語の意味カテゴリ合わせ用。出力に英語は使わない） ---
     base_map_en = {
         "polite requests": "polite requests",
         "asking & giving directions": "asking for directions",
@@ -98,15 +98,12 @@ def _mini_and_scene_label(functional: str, scene: str, lang: str) -> Tuple[str, 
     f_en = base_map_en.get((functional or "").strip().lower(), (functional or "everyday phrases"))
     s_en = base_map_en.get((scene or "").strip().lower(),      (scene      or "a simple situation"))
 
-    # --- 2) 対象言語へ翻訳（英語 or ASCIIなら確実に訳す。既に多言語ならそのまま） ---
     def _localize(text_candidate: str, target_lang: str) -> str:
         tc = (text_candidate or "").strip()
         if not tc:
             return ""
         if target_lang == "en":
-            # 英語ターゲット時：そのまま英語（ただし整形）
             return _normalize_spaces(tc)
-        # ASCIIのみ＝英語等 → 訳す / 非ASCII＝既に多言語 → そのまま
         if _ASCII_ONLY_RE.fullmatch(tc):
             try:
                 out = translate(tc, target_lang)
@@ -120,18 +117,15 @@ def _mini_and_scene_label(functional: str, scene: str, lang: str) -> Tuple[str, 
     f_local = _localize(f_en, lang)
     s_local = _localize(s_en, lang)
 
-    # --- 3) 軽い後処理（言語別の最小限整形） ---
     if lang in ("ja", "ko", "pt", "en"):
         f_local = _normalize_spaces(f_local)
         s_local = _normalize_spaces(s_local)
 
-    # 空落ち保険
     if not f_local:
         f_local = _normalize_spaces(f_en)
     if not s_local:
         s_local = _normalize_spaces(s_en)
 
-    # --- 4) 短い方を {mini}、もう一方を {scene} ---
     mini = f_local if len(f_local) <= len(s_local) else s_local
     return (mini or _normalize_spaces(f_local or "everyday phrases"),
             s_local or _normalize_spaces(s_en or "this situation"))
@@ -159,7 +153,6 @@ _ROLE_MAP = {
 _REQUESTER_ROLES = {"customer","guest","traveler","patient","member","friend","colleague"}
 
 def _infer_roles(theme: str, context: Optional[str]) -> Tuple[str, str]:
-    # 明示上書き（ENV）
     sp_env = os.getenv("HOOK_SPEAKER", "").strip()
     ls_env = os.getenv("HOOK_LISTENER", "").strip()
     if sp_env and ls_env:
@@ -167,12 +160,10 @@ def _infer_roles(theme: str, context: Optional[str]) -> Tuple[str, str]:
 
     text = f"{theme or ''} {context or ''}".lower()
 
-    # コンテキストも含めてキーワード優先で推定
     for k, pair in _ROLE_MAP.items():
         if k in text:
             return pair
 
-    # 追加の語感ヒント
     if any(x in text for x in ("reservation", "check in", "check-in", "front desk")):
         return ("guest", "receptionist")
     if any(x in text for x in ("order", "menu", "table")):
@@ -180,14 +171,12 @@ def _infer_roles(theme: str, context: Optional[str]) -> Tuple[str, str]:
     if any(x in text for x in ("latte", "americano", "barista")):
         return ("customer", "barista")
 
-    # デフォルト
     return ("friend", "friend")
 
 # ---------------- テンプレ定義（視点別に微調整） ----------------
 
 HOOKS = {
     "en": {
-        # requester（頼む側）向けは直接行動を促す
         "shock_req":   ["This sounds rude at {scene}.", "Never say this at {scene}."],
         "empathy_req": ["Freeze up at {scene}?", "Said it and got weird looks?"],
         "time_req":    ["30 seconds. Fix your {mini}.", "Half a minute to nail {scene}."],
@@ -196,7 +185,6 @@ HOOKS = {
         "confirm_req": ["Not sure what to say at {scene}? Use this."],
         "direc_req":   ["Lost at {scene}? Ask like this."],
 
-        # responder（受ける側）向けは案内系に寄せる
         "status_res":  ["Greet and guide smoothly at {scene}.", "Sound helpful in one line."],
         "time_res":    ["30 seconds to upgrade your greeting.", "Half a minute to guide naturally."],
         "release_res": ["Drop the stiff phrasing. Try this one.", "Make it clear and friendly."],
@@ -253,29 +241,82 @@ def _preferred_order_by_pattern(p: Optional[str], requester: bool) -> Tuple[str,
     if any(k in p for k in ("could i", "would you", "may i", "polite")):
         return (("status_req","time_req","release_req","empathy_req","shock_req","confirm_req","direc_req")
                 if requester else ("status_res","time_res","release_res"))
-    # 汎用
     return (("empathy_req","time_req","status_req","release_req","shock_req","confirm_req","direc_req")
             if requester else ("status_res","time_res","release_res"))
 
 def _pick_category(lang: str, pattern_hint: Optional[str], requester: bool) -> str:
-    # 明示固定
     ab = os.getenv("HOOK_AB", "").strip()
     lang_keys = list(HOOKS[lang].keys())
     if ab.isdigit():
         return lang_keys[int(ab) % len(lang_keys)]
-    # 優先順で最初に存在するキー
     for c in _preferred_order_by_pattern(pattern_hint, requester):
         if c in HOOKS[lang]:
             return c
-    # フォールバック
     return "empathy_req" if requester else "status_res"
 
 # ---------------- 公開API ----------------
 
-def generate_hook(theme: str, audio_lang: str, pattern_hint: Optional[str] = None, context: Optional[str] = None) -> str:
+def _compose_text(lang: str, mini: str, scene_label: str, category: str) -> str:
+    template = random.choice(HOOKS[lang][category])
+    text = template.format(mini=mini, scene=scene_label)
+    add_callout = {
+        "en": "Remember just this line.",
+        "ja": "この一言だけ覚えよう。",
+        "ko": "이 한마디만 외워 둬.",
+        "pt": "Repita só esta frase.",
+    }
+    with_callout = f"{text} {add_callout[lang]}"
+    max_lim = int(os.getenv("HOOK_MAX_CHARS", "85")) + (0 if lang in ("en","pt") else 5)
+    text = with_callout if len(with_callout) <= max_lim else text
+    text = _enforce_lang_clean(text, lang)
+    text = _limit(text, lang)
+    return text
+
+def _default_tone_for(category: str, requester: bool) -> str:
+    # カテゴリから自然に導出（必要ならENVで上書き可能）
+    if "shock" in category:
+        return "alert"
+    if "time" in category:
+        return "energetic"
+    if "release" in category:
+        return "friendly"
+    if "status" in category:
+        return "confident" if requester else "helpful"
+    if "confirm" in category:
+        return "calm"
+    if "direc" in category:
+        return "clear"
+    return "friendly"
+
+def _setting_from_theme(functional: str, scene: str) -> str:
+    s = f"{functional} {scene}".lower()
+    if "restaurant" in s: return "restaurant"
+    if "cafe" in s:       return "cafe"
+    if "hotel" in s:      return "hotel"
+    if "train" in s or "station" in s: return "station"
+    if "airport" in s:    return "airport"
+    if "shopping" in s or "store" in s: return "shop"
+    if "doctor" in s:     return "clinic"
+    if "pharmacy" in s:   return "pharmacy"
+    if "work" in s:       return "workplace"
+    if "direction" in s:  return "street"
+    return "general"
+
+def _difficulty_from_env_or_default() -> str:
+    d = os.getenv("DIFF_LEVEL", "").upper()
+    return d if d in ("A1","A2","B1","B2") else "A2"
+
+def generate_hook(
+    theme: str,
+    audio_lang: str,
+    pattern_hint: Optional[str] = None,
+    context: Optional[str] = None,
+    *,
+    return_dict: bool = False
+) -> Any:
     """
-    返り値: 1〜2文の短いフック（字幕側で2文まで許容）
-    ※ main.py から context=... が渡される前提で後方互換（第4引数は任意）
+    return_dict=False（既定）: 文字列（従来互換）
+    return_dict=True           : 構造化dict（下流の統一制御に最適）
     """
     lang = (audio_lang or "en").lower()
     if lang not in HOOKS:
@@ -287,25 +328,44 @@ def generate_hook(theme: str, audio_lang: str, pattern_hint: Optional[str] = Non
     speaker, listener = _infer_roles(theme, context)
     requester = speaker in _REQUESTER_ROLES
 
-    cat = _pick_category(lang, pattern_hint, requester)
-    template = random.choice(HOOKS[lang][cat])
-    text = template.format(mini=mini, scene=scene_label)
+    category = _pick_category(lang, pattern_hint, requester)
+    text = _compose_text(lang, mini, scene_label, category)
 
-    # 二文目の「行動指示」（“copy” は避け、自然な言い方に）
-    add_callout = {
-        "en": "Remember just this line.",
-        "ja": "この一言だけ覚えよう。",
-        "ko": "이 한마디만 외워 둬.",
-        "pt": "Repita só esta frase.",
+    # --- 世界観（統一制御に使うメタ） ---
+    tone = os.getenv("HOOK_TONE", "") or _default_tone_for(category, requester)
+    setting = _setting_from_theme(functional, scene)
+    difficulty = _difficulty_from_env_or_default()
+    pattern = (pattern_hint or "").strip()
+
+    if not return_dict:
+        return text
+
+    spec: Dict[str, Any] = {
+        # 表示用
+        "text": text,
+        "lang": lang,
+
+        # 統一メタ（下流に共有）
+        "tone": tone,                 # 例: energetic/friendly/calm/clear…
+        "setting": setting,           # 例: restaurant/hotel/station/general…
+        "difficulty": difficulty,     # 例: A2（ENVで統一）
+        "speaker": speaker,           # 例: customer/guest/friend…
+        "listener": listener,         # 例: waiter/receptionist/friend…
+        "requester": requester,       # True → req系テンプレ優先
+        "category": category,         # 選ばれたフックカテゴリ
+        "pattern": pattern,           # 上流から来たパターンヒント
+
+        # テーマ分解（UIや背景にも使える）
+        "functional": functional,
+        "scene": scene,
+        "mini": mini,                 # 画面ラベル用の短い語
+        "scene_label": scene_label,   # ローカライズ済みの場面ラベル
+
+        # 安全に上限を共有
+        "max_chars": int(os.getenv("HOOK_MAX_CHARS", "85")) + (0 if lang in ("en","pt") else 5),
     }
+    return spec
 
-    with_callout = f"{text} {add_callout[lang]}"
-    max_lim = int(os.getenv("HOOK_MAX_CHARS", "85")) + (0 if lang in ("en","pt") else 5)
-    if len(with_callout) <= max_lim:
-        text = with_callout
-
-    # 言語統一の強制クリーニング
-    text = _enforce_lang_clean(text, lang)
-    # 長さ最終制御
-    text = _limit(text, lang)
-    return text
+# 新エイリアス（明示的に構造化がほしいとき）
+def generate_hook_spec(theme: str, audio_lang: str, pattern_hint: Optional[str] = None, context: Optional[str] = None) -> Dict[str, Any]:
+    return generate_hook(theme, audio_lang, pattern_hint, context, return_dict=True)
