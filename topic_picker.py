@@ -7,6 +7,7 @@
 #  4) フック互換のタイトル形式（functional – scene）出力を追加（テーマ表示を安定化）。
 #     - THEME_STYLE="plain|functional"（既定: plain）。"functional" で「機能 – シーン」化。
 #  5) 戻り値は従来どおり：vocab では spec dict、return_context=False ならテーマ文字列。
+#  6) 追加：TOPIC_PURE_RANDOM=1 で “完全ランダム抽選（履歴＆日替わり固定を無視）” を選択可能。
 
 import os, json, hashlib, datetime as dt, re, random, secrets
 from pathlib import Path
@@ -21,6 +22,7 @@ DAILY_LOCK     = os.getenv("TOPIC_DAILY", "1") == "1"       # 日替わり固定
 ROLE_MODE      = os.getenv("ROLE_MODE", "rotate").lower()   # fixed / rotate / random
 ROLE_FIXED     = os.getenv("ROLE_FIXED", "").strip()        # "guest,receptionist" のように指定
 THEME_STYLE    = os.getenv("THEME_STYLE", "plain").lower()  # plain / functional
+TOPIC_PURE_RANDOM = os.getenv("TOPIC_PURE_RANDOM", "0") == "1"  # ★ 完全ランダム切替
 
 # ========= テーマ候補プール =========
 POOL = [
@@ -178,6 +180,11 @@ def _pick_role_for(theme: str, audio_lang: str | None = None) -> tuple[str, str]
 
 # ========= AUTOテーマ選択 =========
 def _pick_theme_for(lang: str) -> str:
+    # ★ 完全ランダムモード：履歴・日替わり固定を一切無視（重複を厳密に避けたい場合はOFFにする）
+    if TOPIC_PURE_RANDOM:
+        rnd = random.Random(secrets.randbits(64))
+        return rnd.choice(POOL)
+
     recent = _load_recent(lang)
 
     # DAILY_LOCK：日替わりで安定的に1テーマ
@@ -193,7 +200,7 @@ def _pick_theme_for(lang: str) -> str:
         _save_recent(lang, t)
         return t
 
-    # 完全ランダム（毎回違うシード）
+    # 通常モード：完全ランダムシード＋類似回避
     rnd = random.Random(secrets.randbits(64))
     candidates = POOL[:]
     rnd.shuffle(candidates)
@@ -295,7 +302,7 @@ def pick_by_content_type(content_mode: str, audio_lang: str, return_context: boo
         sp, ls = _pick_role_for(theme, audio_lang)
         _save_role(audio_lang, sp, ls)
         ctx = _make_context(theme, audio_lang, sp, ls)
-        return ( _functionalize(theme), ctx ) if return_context else _functionalize(theme)
+        return (_functionalize(theme), ctx) if return_context else _functionalize(theme)
 
     theme = _pick_theme_for(audio_lang)
     sp, ls = _pick_role_for(theme, audio_lang)
