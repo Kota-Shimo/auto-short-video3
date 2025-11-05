@@ -257,15 +257,15 @@ def _make_context(theme: str, lang: str, speaker: str, listener: str) -> str:
 def _pattern_hint_for(theme: str, speaker: str, listener: str) -> str:
     s = theme.lower()
     if "restaurant" in s or "cafe" in s:
-        return "ordering, asking politely, follow-up requests" if speaker in ("customer") else "offering, confirming, suggesting options"
+        return "ordering, asking politely, follow-up requests" if speaker == "customer" else "offering, confirming, suggesting options"
     if "hotel" in s:
-        return "check-in, confirming details, asking politely" if speaker in ("guest") else "welcoming, explaining, offering help"
+        return "check-in, confirming details, asking politely" if speaker == "guest" else "welcoming, explaining, offering help"
     if "train" in s or "station" in s or "airport" in s:
         return "asking time and place, tickets, directions, confirming details"
     if "shopping" in s or "price" in s or "payment" in s or "store" in s:
-        return "asking price, options, short reasons" if speaker in ("customer") else "explaining options, confirming total, politeness"
+        return "asking price, options, short reasons" if speaker == "customer" else "explaining options, confirming total, politeness"
     return "short natural exchanges, opinions, confirmations"
-
+    
 # ========= トレンドspec =========
 def build_trend_spec(theme: str, audio_lang: str, count: int | None = None) -> dict[str, Any]:
     c = int(count or WORDS_DEFAULT)
