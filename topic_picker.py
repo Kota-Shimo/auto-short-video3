@@ -1,28 +1,23 @@
-# topic_picker.py – AUTOの多様化 & 日替わり固定 + 会話視点 (speaker/listener)
-# 改訂点（要約）
-#  1) 日替わり固定（DAILY_LOCK=1）の実装：UTC日付＋言語ごとに安定的に1テーマを選択。
-#  2) ROLE_MODE 対応：fixed / rotate / random を実装（rotate は直近ロールを回す）。
-#     - ROLE_FIXED="speaker,listener" で固定指定可（例: "guest,receptionist"）
-#  3) 類似回避を強化：直近とのキー被りだけでなく、“機能-シーン”の粗い重なりも抑制。
-#  4) フック互換のタイトル形式（functional – scene）出力を追加（テーマ表示を安定化）。
-#     - THEME_STYLE="plain|functional"（既定: plain）。"functional" で「機能 – シーン」化。
-#  5) 戻り値は従来どおり：vocab では spec dict、return_context=False ならテーマ文字列。
-#  6) 追加：TOPIC_PURE_RANDOM=1 で “完全ランダム抽選（履歴＆日替わり固定を無視）” を選択可能。
+# topic_picker.py – AUTOを“完全ランダム抽選”に固定（履歴・日替わり固定は不使用）
+# ポイント
+#  - テーマ選択は毎回 secrets.randbits(64) による乱数で POOL から choice するだけ。
+#  - DAILY_LOCK / 履歴保存 / 類似回避ロジックは定義は残すが未使用。
+#  - 役割（speaker/listener）はこれまでのマッピングを維持（ROLE_MODE=rotate 既定）。
+#  - 統一構造（spec 返却・context 生成・pattern_hint）は従来どおり。
 
 import os, json, hashlib, datetime as dt, re, random, secrets
 from pathlib import Path
 from typing import Any, Tuple
 from config import TEMP
 
-# ========= 基本設定 =========
-RECENT_BLOCK_N = int(os.getenv("RECENT_BLOCK_N", "7"))      # 直近ブロック数
+# ========= 基本設定（既定値は維持、ただしランダム運用では参照しない） =========
+RECENT_BLOCK_N = int(os.getenv("RECENT_BLOCK_N", "7"))      # 未使用（互換のため残置）
 DIFF_LEVEL     = os.getenv("DIFF_LEVEL", "A2")              # A1/A2/B1/B2
 WORDS_DEFAULT  = int(os.getenv("VOCAB_WORDS", "6"))         # 単語数
-DAILY_LOCK     = os.getenv("TOPIC_DAILY", "1") == "1"       # 日替わり固定（UTC基準）
+DAILY_LOCK     = False  # ★ 日替わり固定は強制無効化
 ROLE_MODE      = os.getenv("ROLE_MODE", "rotate").lower()   # fixed / rotate / random
-ROLE_FIXED     = os.getenv("ROLE_FIXED", "").strip()        # "guest,receptionist" のように指定
+ROLE_FIXED     = os.getenv("ROLE_FIXED", "").strip()        # "guest,receptionist"
 THEME_STYLE    = os.getenv("THEME_STYLE", "plain").lower()  # plain / functional
-TOPIC_PURE_RANDOM = os.getenv("TOPIC_PURE_RANDOM", "0") == "1"  # ★ 完全ランダム切替
 
 # ========= テーマ候補プール =========
 POOL = [
@@ -65,7 +60,7 @@ ROLE_MAP = {
     "photo": ("traveler", "local"),
 }
 
-# ========= 類似テーマ判定 =========
+# ========= （互換用に残すが未使用）類似判定・履歴保存 =========
 KEYMAP = {
     "restaurant": ["restaurant","order","menu","request","polite","table","bill"],
     "cafe":       ["cafe","coffee","barista","order","latte","americano"],
@@ -96,7 +91,6 @@ def _too_similar(a: str, b: str) -> bool:
     wa, wb = set(re.findall(r"[a-z]+", (a or "").lower())), set(re.findall(r"[a-z]+", (b or "").lower()))
     return len(wa & wb) >= 3
 
-# ========= 最近テーマ保存 =========
 def _recent_path(lang: str) -> Path:
     p = TEMP / f"recent_topics_{lang}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -109,12 +103,13 @@ def _load_recent(lang: str) -> list[str]:
         return []
 
 def _save_recent(lang: str, topic: str):
+    # ★ 完全ランダム運用では呼ばれない（互換のため残置）
     lst = [x for x in _load_recent(lang) if x] + [topic]
     if len(lst) > RECENT_BLOCK_N:
         lst = lst[-RECENT_BLOCK_N:]
     _recent_path(lang).write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
 
-# ========= 直近期のロール履歴 =========
+# ========= 直近期のロール履歴（rotate 用） =========
 def _role_hist_path(lang: str) -> Path:
     p = TEMP / f"recent_roles_{lang}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +128,7 @@ def _save_role(lang: str, sp: str, ls: str):
         hist = hist[-12:]
     _role_hist_path(lang).write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
-# ========= 日替わりシード =========
+# ========= 日替わりシード（未使用だが互換で残置） =========
 def _daily_seed(lang: str) -> int:
     today = dt.datetime.utcnow().strftime("%Y%m%d")
     base = f"{lang}:{today}:{os.getenv('TOPIC_SALT','v1')}"
@@ -169,59 +164,28 @@ def _pick_role_for(theme: str, audio_lang: str | None = None) -> tuple[str, str]
         # 同じなら裏返す or friend↔friend に落とす
         if last == base_pair:
             if base_pair == ("friend","friend"):
-                # 友達同士が続いたら base を採用
                 return base_pair
-            # 役割を逆回し（例：customer↔waiter）
             return (base_pair[1], base_pair[0])
         return base_pair
 
     # default
     return base_pair
 
-# ========= AUTOテーマ選択 =========
+# ========= AUTOテーマ選択（★完全ランダム版） =========
 def _pick_theme_for(lang: str) -> str:
-    # ★ 完全ランダムモード：履歴・日替わり固定を一切無視（重複を厳密に避けたい場合はOFFにする）
-    if TOPIC_PURE_RANDOM:
-        rnd = random.Random(secrets.randbits(64))
-        return rnd.choice(POOL)
-
-    recent = _load_recent(lang)
-
-    # DAILY_LOCK：日替わりで安定的に1テーマ
-    if DAILY_LOCK:
-        rnd = random.Random(_daily_seed(lang))
-        candidates = POOL[:]
-        rnd.shuffle(candidates)
-        for t in candidates:
-            if all(not _too_similar(t, r) for r in recent[-RECENT_BLOCK_N:]):
-                _save_recent(lang, t)
-                return t
-        t = "everyday small talk"
-        _save_recent(lang, t)
-        return t
-
-    # 通常モード：完全ランダムシード＋類似回避
+    # 毎回違うシードで POOL から 1 件を選ぶだけ（履歴・日替わり・類似回避は不使用）
     rnd = random.Random(secrets.randbits(64))
-    candidates = POOL[:]
-    rnd.shuffle(candidates)
-
-    for t in candidates:
-        if all(not _too_similar(t, r) for r in recent[-RECENT_BLOCK_N:]):
-            _save_recent(lang, t)
-            return t
-
-    t = "everyday small talk"
-    _save_recent(lang, t)
+    t = rnd.choice(POOL)
+    # 目視デバッグ用（不要なら消してOK）
+    print(f"[TOPIC_PICK] mode=PURE_RANDOM lang={lang} -> {t}")
     return t
 
 # ========= 機能 – シーン（hook互換の表示整形）=========
-# THEME_STYLE="functional" の場合に、だいたいの「機能 – シーン」形に寄せる
 def _functionalize(theme: str) -> str:
     if THEME_STYLE != "functional":
         return theme
     s = (theme or "").lower()
 
-    # 粗い分類
     if "restaurant" in s or "cafe" in s:
         func = "polite requests"
         scene = "at a restaurant" if "restaurant" in s else "at a cafe"
@@ -242,12 +206,10 @@ def _functionalize(theme: str) -> str:
         return "small talk – at work"
     if "weather" in s or "weekend" in s or "hobbies" in s:
         return "small talk – everyday life"
-    # 既定
     return "everyday phrases – a simple situation"
 
 # ========= context生成 =========
 def _make_context(theme: str, lang: str, speaker: str, listener: str) -> str:
-    # theme は表示用に functionalize したものを採用（例文の安定化に寄与）
     shown_theme = _functionalize(theme)
     if lang == "ja":
         return (
@@ -272,13 +234,12 @@ def _pattern_hint_for(theme: str, speaker: str, listener: str) -> str:
     if "shopping" in s or "price" in s or "payment" in s or "store" in s:
         return "asking price, options, short reasons" if speaker == "customer" else "explaining options, confirming total, politeness"
     return "short natural exchanges, opinions, confirmations"
-    
+
 # ========= トレンドspec =========
 def build_trend_spec(theme: str, audio_lang: str, count: int | None = None) -> dict[str, Any]:
     c = int(count or WORDS_DEFAULT)
     sp, ls = _pick_role_for(theme, audio_lang)
-    # ロール履歴を保存（rotate 制御のため）
-    _save_role(audio_lang, sp, ls)
+    _save_role(audio_lang, sp, ls)  # rotate 用
     return {
         "theme": _functionalize(theme),
         "context": (
