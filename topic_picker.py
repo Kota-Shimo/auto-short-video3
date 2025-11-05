@@ -18,8 +18,8 @@ from config import TEMP
 RECENT_BLOCK_N = int(os.getenv("RECENT_BLOCK_N", "7"))      # 直近ブロック数
 DIFF_LEVEL     = os.getenv("DIFF_LEVEL", "A2")              # A1/A2/B1/B2
 WORDS_DEFAULT  = int(os.getenv("VOCAB_WORDS", "6"))         # 単語数
-DAILY_LOCK     = os.getenv("TOPIC_DAILY", "1") == "1"       # 日替わり固定（UTC基準）
-ROLE_MODE      = os.getenv("ROLE_MODE", "rotate").lower()   # fixed / rotate / random
+DAILY_LOCK     = os.getenv("TOPIC_DAILY", "0") == "1"       # 既定OFF
+TOPIC_PURE_RANDOM = os.getenv("TOPIC_PURE_RANDOM", "1") == "1"  # 既定ON
 ROLE_FIXED     = os.getenv("ROLE_FIXED", "").strip()        # "guest,receptionist" のように指定
 THEME_STYLE    = os.getenv("THEME_STYLE", "plain").lower()  # plain / functional
 TOPIC_PURE_RANDOM = os.getenv("TOPIC_PURE_RANDOM", "0") == "1"  # ★ 完全ランダム切替
