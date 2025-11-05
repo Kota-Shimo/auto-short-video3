@@ -10,6 +10,7 @@ main.py – VOCAB専用版（単純結合＋日本語ふりがな[TTSのみ]＋�
 - 追加: 日本語の例文行も“かな読み”に変換して読み上げ可能（字幕は原文のまま）。
 - 追加: 語彙バリエーション最適化（直近履歴ペナルティ＋再生成）で「同じ単語ばかり」を回避。
 - 追加: テーマ回転（直近テーマの回避）で「同じテーマ連続」を抑制。
+- 追加: hook.py の構造化出力（tone/difficulty/視点）を取り込み、統一メタで駆動。
 """
 
 import argparse, logging, re, json, subprocess, os, sys, random, time, secrets
@@ -33,6 +34,7 @@ from topic_picker   import pick_by_content_type
 from trend_fetcher  import get_trend_candidates
 import datetime as dt
 
+# --- hook: 構造化出力に対応（旧版互換のフォールバックあり）
 from hook import generate_hook
 
 HOOK_ENABLE = os.getenv("HOOK_ENABLE", "1") == "1"
@@ -295,11 +297,11 @@ def _lang_rules(lang_code: str) -> str:
         )
     lang_name = LANG_NAME.get(lang_code, "English")
     return (
-        f"Write entirely in {lang_name}. "
-        "Do not code-switch or include other writing systems. "
-        "Avoid ASCII symbols like '/', '-', '→', '()', '[]', '<>', and '|'. "
-        "No translation glosses, brackets, or country/language mentions."
-    )
+            f"Write entirely in {lang_name}. "
+            "Do not code-switch or include other writing systems. "
+            "Avoid ASCII symbols like '/', '-', '→', '()', '[]', '<>', and '|'. "
+            "No translation glosses, brackets, or country/language mentions."
+        )
 
 # ───────────────────────────────────────────────
 # 日本語向けヒューリスティック
@@ -1092,51 +1094,79 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     except Exception as e:
         logging.warning(f"[VARIETY] history save failed: {e}")
 
-    # 3行ブロック: 単語 → 単語 → 例文
-    dialogue = []
-    for w in vocab_words:
-        diff = (spec.get("difficulty") if isinstance(spec, dict) else None)
-        ex = _gen_example_sentence(w, audio_lang, local_context, difficulty=diff)
-        dialogue.extend([("N", w), ("N", w), ("N", ex)])
-
-    valid_dialogue = [(spk, line) for (spk, line) in dialogue if line.strip()]
-    audio_parts, sub_rows = [], [[] for _ in subs]
-    plain_lines, tts_lines = [line for (_, line) in valid_dialogue], []
-
-    # === フック ===（★修正：言語強制＆クリーニングを追加）
+    # === フック（構造化メタ統合） ==========================================
     hook_text = None
+    hook_tone = HOOK_STYLE  # 既定フォールバック
+    hook_meta = None
     hook_offset = 0
+
     if HOOK_ENABLE:
         theme_for_hook = theme if isinstance(theme, str) and theme else "everyday phrases – a simple situation"
         pattern_hint   = (spec.get("pattern_hint") if isinstance(spec, dict) else None)
-    
+
         # topic_picker からの視点ヒント（任意）
         try:
             os.environ["HOOK_SPEAKER"]  = spec.get("speaker", "") if isinstance(spec, dict) else ""
             os.environ["HOOK_LISTENER"] = spec.get("listener", "") if isinstance(spec, dict) else ""
         except Exception:
             pass
-    
+
+        # 構造化出力（新hook）→ 失敗時は旧動作（テキストのみ）にフォールバック
         try:
-            # ★ ここだけ変更：context=local_context を明示
-            hook_text = generate_hook(theme_for_hook, audio_lang, pattern_hint, context=local_context)
+            hook_meta = generate_hook(theme_for_hook, audio_lang, pattern_hint, context=local_context, return_dict=True)  # 新API
+            hook_text = (hook_meta or {}).get("text") or ""
+            hook_tone = (hook_meta or {}).get("tone") or HOOK_STYLE
+            # デバッグ保存
+            try:
+                (TEMP / "hook_spec.json").write_text(json.dumps(hook_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        except TypeError:
+            # 旧API: 文字列返却のみ
+            try:
+                hook_text = generate_hook(theme_for_hook, audio_lang, pattern_hint, context=local_context)
+            except Exception:
+                hook_text = None
         except Exception:
             hook_text = None
-    
+
         if hook_text:
-            # ★ 音声言語へ強制翻訳（同言語なら無影響）
+            # 音声言語へ強制翻訳（同言語なら無影響）
             try:
                 hook_text = translate(hook_text, audio_lang)
             except Exception:
                 pass
-            # ★ 2文まで＆長さ制限のクリーニング
+            # 2文まで＆長さ制限のクリーニング
             hook_text = _clean_sub_line_hook(hook_text, audio_lang, max_sents=2, max_len=120)
-            # ★ 日本語は末尾句点補正
+            # 日本語は末尾句点補正
             if audio_lang == "ja":
                 hook_text = _ensure_period_for_sentence(hook_text, "ja")
-            # 挿入
-            valid_dialogue.insert(0, ("N", hook_text))
-            hook_offset = 1
+            # フック行を先頭に挿入
+            # （valid_dialogue 生成前なので、後段のロジックに合わせる）
+        # =====================================================================
+
+    # 3行ブロック: 単語 → 単語 → 例文
+    dialogue = []
+    # 例文難易度：spec優先、無ければ hook_meta の CEFR を流用
+    unified_difficulty = None
+    if isinstance(spec, dict):
+        unified_difficulty = (spec.get("difficulty") or "").strip().upper() or None
+    if not unified_difficulty and isinstance(hook_meta, dict):
+        unified_difficulty = (hook_meta.get("difficulty") or "").strip().upper() or None
+
+    for w in vocab_words:
+        ex = _gen_example_sentence(w, audio_lang, local_context, difficulty=unified_difficulty)
+        dialogue.extend([("N", w), ("N", w), ("N", ex)])
+
+    valid_dialogue = [(spk, line) for (spk, line) in dialogue if line.strip()]
+
+    # フック挿入は valid_dialogue の準備後に行う（処理を単純化）
+    if hook_text:
+        valid_dialogue.insert(0, ("N", hook_text))
+        hook_offset = 1
+
+    audio_parts, sub_rows = [], [[] for _ in subs]
+    plain_lines, tts_lines = [line for (_, line) in valid_dialogue], []
 
     # TTS & 字幕
     for i, (spk, line) in enumerate(valid_dialogue, 1):
@@ -1170,7 +1200,8 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
                 tts_line = _ensure_period_for_sentence(tts_line, audio_lang)
 
         out_audio = TEMP / f"{i:02d}.wav"
-        style_for_tts = HOOK_STYLE if role_idx == -1 else ("serious" if audio_lang == "ja" else "neutral")
+        # フック行のTTSスタイルは hook_meta の tone を優先（なければENVのHOOK_STYLE）
+        style_for_tts = (hook_tone if role_idx == -1 else ("serious" if audio_lang == "ja" else "neutral"))
         speak(audio_lang, spk, tts_line, out_audio, style=style_for_tts)
         audio_parts.append(out_audio)
         tts_lines.append(tts_line)
@@ -1232,7 +1263,7 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     enhance(TEMP/"full_raw.wav", TEMP/"full.wav")
     AudioSegment.from_file(TEMP/"full.wav").export(TEMP/"full.mp3", format="mp3")
 
-    # 背景画像（✅ 単語ベースに変更：フック/テーマは一切使わない）
+    # 背景画像（✅ 単語ベース：フック/テーマは使わない方針を維持）
     bg_png = TEMP / "bg.png"
 
     def _is_ascii(s: str) -> bool:
